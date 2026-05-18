@@ -64,53 +64,31 @@
 
 #include "algnbyte.h"
 
-#if defined(__WATCOMC__) || defined(__GNUC__)
-struct fcb     {
+struct sfcb {
 	char bytes[0x25];
 };
 
-#ifdef __WATCOMC__
-char *parsfnm(const char *cmdline, struct fcb far *fcbptr, int option);
-#if defined(__TINY__) || defined(__SMALL__) || defined(__MEDIUM__)
-#pragma aux parsfnm = \
-	"mov ah, 29h" \
-	"int 21h" \
-	"inc al" \
-	"jnz ok" \
-	"xor si, si" \
-	"ok:" \
-	__parm [__si] [__es __di] [__ax] __value [__si] __modify [__ax __es]
-#else
-#pragma aux parsfnm = \
-	"mov ah, 29h" \
-	"int 21h" \
-	"inc al" \
-	"jnz ok" \
-	"xor si, si" \
-	"ok:" \
-	__parm [__ds __si] [__es __di] [__ax] __value [__ds __si] __modify [__ax __es]
-#endif
-#else /* __GNUC__ */
-static char *parsfnm(const char *cmdline, struct fcb far *fcbptr, int option)
+static unsigned char parseToFCB(const char **str, struct sfcb far *fcbptr, int option)
 {
-	char *ret;
-	unsigned char opt = option;
-	asm volatile("int $0x21" :
-		"=S"(ret), "+Ral"(opt) :
-		"Rah"((unsigned char)0x29), "e"(FP_SEG(fcbptr)), "D"(FP_OFF(fcbptr)),
-		"Rds"(FP_SEG(cmdline)), "0"(cmdline) :
-		"cc", "memory");
-	return opt == 0xff ? NULL : ret;
+	IREGS r;
+
+	r.r_ax = 0x29 << 8 | (unsigned char)option;
+	r.r_ds = FP_SEG(*str);
+	r.r_si = FP_OFF(*str);
+	r.r_es = FP_SEG(fcbptr);
+	r.r_di = FP_OFF(fcbptr);
+	intrpt(0x21, &r);
+
+	*str = (const char *)MK_FP(r.r_ds, r.r_si);
+	return r.r_ax & 0xff;
 }
-#endif
-#endif
 
 struct ExecBlock
 {
 	word segOfEnv;
 	char far *cmdLine;
-	struct fcb far *fcb1;
-	struct fcb far *fcb2;
+	struct sfcb far *fcb1;
+	struct sfcb far *fcb2;
 };
 
 #include "algndflt.h"
@@ -125,10 +103,11 @@ int exec(const char *cmd, char *cmdLine, const unsigned segOfEnv)
 #else
 	unsigned char buf[MAX_EXTERNAL_COMMAND_SIZE+2]; /* 128 bytes is max size in PSP, 2 bytes for size and terminator */
 #endif
-	struct fcb fcb1, fcb2;
+	struct sfcb fcb1, fcb2;
 	struct ExecBlock execBlock;
 	int retval;
 	int cmdLen;
+	const char *p;
 
 	assert(cmd);
 	assert(cmdLine);
@@ -156,8 +135,13 @@ int exec(const char *cmd, char *cmdLine, const unsigned segOfEnv)
 	}
 
 	/* fill FCBs */
-	if ((cmdLine = parsfnm(cmdLine, &fcb1, 1)) != 0) {
-		parsfnm(cmdLine, &fcb2, 1);
+	p = cmdLine;
+	parseToFCB(&p, &fcb1, 1);
+	if (p > cmdLine && strlen(p)) {  /* We moved on (hopefully to arg2) and we have length */
+		parseToFCB(&p, &fcb2, 1);
+	} else {  /* Initialise with all zeros, except spaces for filename.ext */
+		memset(&fcb2, 0, sizeof(fcb2));
+		memset(&fcb2.bytes[1], ' ', 11);
 	}
 
 	saveSession();
@@ -178,8 +162,8 @@ int exec(const char *cmd, char *cmdLine, const unsigned segOfEnv)
 		/* fill execute structure */
 		execBlock.segOfEnv = segOfEnv;
 		execBlock.cmdLine = (char far *)buf;
-		execBlock.fcb1 = (struct fcb far *)&fcb1;
-		execBlock.fcb2 = (struct fcb far *)&fcb2;
+		execBlock.fcb1 = (struct sfcb far *)&fcb1;
+		execBlock.fcb2 = (struct sfcb far *)&fcb2;
 
 		retval = lowLevelExec((char far*)cmd, (struct ExecBlock far*)&execBlock);
 	}
